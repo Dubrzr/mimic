@@ -46,8 +46,8 @@ def smooth(x,window_len=11,window='hanning'):
         return x
 
 
-    if not window in ['flat', 'hanning', 'hamming', 'bartlett', 'blackman']:
-        raise ValueError("Window is on of 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'")
+    #if not window in ['flat', 'hanning', 'hamming', 'bartlett', 'blackman']:
+    #    raise ValueError("'flat', 'hanning', 'hamming', 'bartlett', 'blackman'")
 
 
     s=np.r_[x[window_len-1:0:-1],x,x[-1:-window_len:-1]]
@@ -64,7 +64,7 @@ def myplot(sig, fields, figsize=(20,10), title='', smoothing=None, savedir='sche
         print("Displaying more than one million values won't be done.")
 
     plt.clf()
-    fig, ax = plt.subplots(2, figsize=figsize)
+    fig, ax = plt.subplots(sig.shape[1], figsize=figsize)
 
     t = np.array(range(0,sig.shape[0]))/fields["fs"]
 
