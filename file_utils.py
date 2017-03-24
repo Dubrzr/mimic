@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import requests
 import hashlib
+import json
 
 def sizeof_fmt(num, suffix='B'):
     for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
@@ -64,3 +65,11 @@ def download_file(url, path):
         with open(path, 'wb') as f:
             for chunk in r.iter_content(1024):
                 f.write(chunk)
+
+def read_json(filepath):
+    with open(filepath, 'r') as f:
+        return json.load(f)
+
+def write_json(contents, filepath):
+    with open(filepath, 'w+') as f:
+        json.dump(contents, f)
