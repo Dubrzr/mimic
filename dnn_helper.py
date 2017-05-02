@@ -26,6 +26,9 @@ def resample_ann(tt, annsamp, anntype):
         if anntype[i] not in beat_annotations:
             continue
         while True:
+            if j+1 == len(tt):
+                result[j] = 1
+                break
             tnow = tt[j+1]
             if tprec <= v and v <= tnow:
                 if v-tprec < tnow-v:
@@ -76,17 +79,28 @@ def load_example(db, i, fs_target):
     f = data_dir + db + '/' + 'tr_{}_{}hz-normalized.npy'.format(i, fs_target)
     if not os.path.isfile(f):
         transform_example(db, i, fs_target)
-    return numpy.load(f, mmap_mode='r', allow_pickle=True)['arr_0']
+    return numpy.load(f, mmap_mode='r', allow_pickle=True)
 
 
 def load_steps(db, i, fs_target, y_delay, segment_size, segment_step, normalized_steps):
     f = data_dir + db + '/' + 'tr_{}_{}hz_{}delay_{}ssi_{}sst'.format(i, fs_target, y_delay, segment_size, segment_step)
-    if normalized_steps is not None:
+    if normalized_steps is not None and normalized_steps:
         f += '-normalized.npy'
     else:
         f += '.npy'
-    return numpy.load(f, mmap_mode='r', allow_pickle=True)['arr_0']
-    
+    return numpy.load(f, mmap_mode='r', allow_pickle=True)
+
+
+def shuffled_examples(fs_target, y_delay, segment_size, segment_step, normalize_steps):
+    hhh = []
+    ll = 0
+    for db, ids in databases:
+        for i in ids:
+            for j in range(len(load_steps(db, i, fs_target, y_delay, segment_size, segment_step, normalize_steps))):
+                hhh.append((db, i, j))
+    numpy.random.shuffle(hhh)
+    return hhh
+
 
 def npz_to_npy(f):
     out_f = f[:-4] + '.npy'
@@ -94,7 +108,7 @@ def npz_to_npy(f):
         return
     tmp = numpy.load(f, mmap_mode='r', allow_pickle=True)['arr_0']
     numpy.save(out_f, tmp)
-    
+
 
 def transform_example(db, i, fs_target, y_delay=None, segment_size=None, segment_step=None, normalize_steps=None):
     assert (y_delay is None and segment_size is None and segment_step is None and normalize_steps is None) or \
@@ -103,12 +117,16 @@ def transform_example(db, i, fs_target, y_delay=None, segment_size=None, segment
     f = data_dir + db + '/' + i
     out_resamp_norm = data_dir + db + '/' + 'tr_{}_{}hz-normalized.npy'.format(i, fs_target)
     out = data_dir + db + '/' + 'tr_{}_{}hz_{}delay_{}ssi_{}sst'.format(i, fs_target, y_delay, segment_size, segment_step)
-    if normalize_steps is not None:
+    if normalize_steps is not None and normalize_steps:
         out += '-normalized.npy'
     else:
         out += '.npy'
     if not os.path.isfile(out_resamp_norm):
-        sig, fields = wfdb.srdsamp(f)
+        try:
+            sig, fields = wfdb.srdsamp(f)
+        except:
+            print(db, i, 'Could not be loaded with wfdb!')
+            return
         fs = fields['fs']
         ann = wfdb.rdann(f, 'atr')
         if not numpy.array_equal(ann.chan, numpy.full(len(ann.chan), ann.chan[0])): # Changing channels though time
@@ -123,10 +141,10 @@ def transform_example(db, i, fs_target, y_delay=None, segment_size=None, segment
         #y = numpy.zeros(len(x))
         #print('annsamp', ann.annsamp, 'anntype', ann.anntype, 'subtype', ann.subtype)
         #y[ann.annsamp] = 1
-        numpy.savez_compressed(out_resamp_norm, numpy.asarray([x, y]))
+        numpy.save(out_resamp_norm, numpy.asarray([x, y]))
     elif y_delay is not None and not os.path.isfile(out):
         try:
-            xy = numpy.load(out_resamp_norm, mmap_mode='r', allow_pickle=True)['arr_0']
+            xy = numpy.load(out_resamp_norm, mmap_mode='r', allow_pickle=True)
         except Exception as e:
             print('failed on {}: {}'.format(out_resamp_norm, e))
             raise e
@@ -167,6 +185,47 @@ def load_model(filepath):
     model = net['model']
     params = net['params']
     return model, params
+
+def load_fnpz(f):
+    xy = numpy.load(f, mmap_mode='r', allow_pickle=True)['arr_0']
+    return xy[0,:], xy[1,:]
+
+
+def load_db(db_name, y_delay, segment_size, segment_step, train_perc):
+    XY_file = data_dir + db_name + '/XY_delay0-5000-2500.normalized.dnn.npz'
+    if os.path.isfile(XY_file):
+        XY = numpy.load(XY_file, mmap_mode='r', allow_pickle=True)['arr_0']
+        print('Loaded {} examples of length {} with a delay of {} sample(s).'.format(len(XY), segment_size, y_delay))
+    else:
+        sigs = []
+        for f in glob.glob(data_dir + db_name + '/*.normalized.dnn.npz'):
+            x, y = load_fnpz(f)
+            sigs.append((x, y))
+        XY = []
+        for (x, y) in sigs:
+            for i in range(0, len(x)+1-segment_size, segment_step):
+                if y_delay == 0:
+                    XY.append((
+                            [[e] for e in x[i:i+segment_size]],
+                            [[e] for e in y[i:i+segment_size-y_delay]]))
+                else:
+                    # We pad y labels with *y_delay* zeros (so that RNNs have some future context to predict classes)
+                    XY.append((
+                        [[e] for e in x[i:i+segment_size]],
+                        numpy.concatenate(([[0] for e in range(y_delay)], [[e] for e in y[i:i+segment_size-y_delay]]))[:segment_size]
+                    ))
+        random.shuffle(XY)
+        numpy.savez_compressed(XY_file, XY)
+        print('Constructed {} examples of length {} with a delay of {} sample(s).'.format(len(XY), segment_size, y_delay))
+
+    s = int(len(XY) * train_perc/100)
+    trainXY, testXY = XY[:s], XY[s:]
+    print('- {} training examples ({}%)'.format(len(trainXY), train_perc))
+    print('- {} testing examples ({}%)'.format(len(testXY), 100-train_perc))
+    trainXY = numpy.asarray(trainXY)
+    testXY = numpy.asarray(testXY)
+    return trainXY, testXY
+
 
 
 def sa(v, a1, a2):
@@ -270,10 +329,11 @@ def roc_auc(y_true, y_pred, margin=0):
     return rp, fp, tp, fpr, tpr, thresholds, auc(fpr, tpr)
 
 
-def eval_model(testXY, eval_fun, min_gap, max_gap, left_border, right_border,
+def eval_model(test_exs, eval_fun, min_gap, max_gap, left_border, right_border,
+               fs_target, y_delay, segment_size, segment_step, normalized_steps,
                plot_examples=True, exs=None, nb=2, threshold=None, nearest_fpr=None, eval_margin=10):
     if exs is None:
-        exs = numpy.random.randint(len(testXY), size=nb).tolist()
+        exs = numpy.random.randint(len(test_exs), size=nb).tolist()
     if plot_examples:
         fig, ax = plt.subplots(len(exs), figsize=(30, 10*len(exs)))#, dpi=600)
     
@@ -282,16 +342,19 @@ def eval_model(testXY, eval_fun, min_gap, max_gap, left_border, right_border,
     
     for i, ex_id in enumerate(exs):
         print('Example {}'.format(ex_id))
-        X = sa(testXY[ex_id, 0], 0, 1)
-        Y = sa(testXY[ex_id, 1], 0, 1)
+        db, k, j = test_exs[ex_id]
+        XY = load_steps(db, k, fs_target, y_delay, segment_size, segment_step, normalized_steps)[j]
+        X, Y = numpy.reshape(XY[0], (1, 1, 5000)), numpy.reshape(XY[1], (5000,))
         
-        res = eval_fun(numpy.asarray([X]))
+        print(X.shape, Y.shape)
+        
+        res = eval_fun(X)
         res = res[0][0]
         
-        best_peaks_idxs = compute_best_peak(signal=X[0], rpeaks=res, min_gap=min_gap, max_gap=max_gap, threshold=threshold)
-        best_peaks_vals = X[0][best_peaks_idxs]
+        best_peaks_idxs = compute_best_peak(signal=X[0][0], rpeaks=res, min_gap=min_gap, max_gap=max_gap, threshold=threshold)
+        best_peaks_vals = X[0][0][best_peaks_idxs]
         
-        y_true = Y[0]
+        y_true = Y
         y_pred = numpy.zeros(len(res))
         y_pred[best_peaks_idxs] = 1
         
@@ -301,13 +364,15 @@ def eval_model(testXY, eval_fun, min_gap, max_gap, left_border, right_border,
         rp, fp, tp, fpr, tpr, thresholds, auc = roc_auc(y_true[left_border:-right_border], y_pred[left_border:-right_border], margin=eval_margin)
         
         if plot_examples:
-            ax[i].plot(Y[0]+1, color='blue')
-            ax[i].plot(X[0], color='green')
+            ax[i].plot(Y+1, color='blue')
+            ax[i].plot(X[0][0], color='green')
             ax[i].plot(res-1, color='red')
+            b_peaks_idx = numpy.where(Y==1)[0]
+            ax[i].plot(b_peaks_idx, X[0][0][b_peaks_idx], 'b+')
             ax[i].plot(best_peaks_idxs, best_peaks_vals, 'r+')
             ax[i].plot([left_border, left_border], [-1, 2], 'm-')
             ax[i].plot([len(res)-right_border, len(res)-right_border], [-1, 2], 'm-')
-            ax[i].set_title('Example {} (TP={}/{}, FP={}/0, TPR={}, FPR={})'.format(ex_id, tp, rp, fp, tpr, fpr))
+            ax[i].set_title('Example {} ({}/{}/{}) (TP={}/{}, FP={}/0, TPR={}, FPR={})'.format(ex_id, db, k, j, tp, rp, fp, tpr, fpr))
     
     if plot_examples:
         plt.show()
