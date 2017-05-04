@@ -19,6 +19,7 @@ def resample_ann(tt, annsamp, anntype):
     # returns a binary array containing zeros everywhere excepted where there is a heart beat (R peak)
     # tt is the second variable returned by signal.resample, and is increasing
     # annsamp is also increasing
+    annsamp = numpy.sort(annsamp)
     result = numpy.zeros(len(tt), dtype='bool')
     j = 0
     tprec = tt[j]
@@ -26,6 +27,7 @@ def resample_ann(tt, annsamp, anntype):
         if anntype[i] not in beat_annotations:
             continue
         while True:
+            d = False
             if j+1 == len(tt):
                 result[j] = 1
                 break
@@ -35,16 +37,25 @@ def resample_ann(tt, annsamp, anntype):
                     result[j] = 1
                 else:
                     result[j+1] = 1
-                break
+                d = True
             j += 1
             tprec = tnow
+            if d:
+                break
     return result
 
 
 def resample(s, annsamp, anntype, fs, fs_target):
+    if fs == fs_target:
+        y = numpy.zeros(len(s), dtype='bool')
+        y[annsamp] = 1
+        return s, y
+        
     new_length = int(len(s)*fs_target/fs)
     #print('{:,} -> {:,} ({}hz to {}hz)'.format(len(s), new_length, fs, fs_target), end='')
-    x, tt = signal.resample(s, num=new_length, t=numpy.arange(len(s)))
+    x, tt = signal.resample(s, num=new_length, t=numpy.arange(len(s)).astype('float64'))
+    assert x.shape == tt.shape
+    assert numpy.all(numpy.diff(tt) > 0)
     y = resample_ann(tt, annsamp, anntype)
     assert x.shape == y.shape
     return x, y
@@ -59,20 +70,35 @@ def normalize(x, lb=0, ub=1):
     return x * coef - (mid_v * coef) + mid
 
        
-def stepize(x, y, y_delay, segment_size, segment_step, normalize_steps):
+def stepize(x, y, segment_size, segment_step, normalize_steps):
+    assert x.shape[0] >= segment_size
     XY = []
     for i in range(0, len(x)+1-segment_size, segment_step):
         if normalize_steps:
             xx = numpy.reshape(normalize(x[i:i+segment_size]), (segment_size, 1))
         else:
             xx = numpy.reshape(x[i:i+segment_size], (segment_size, 1))
-        if y_delay == 0:
-            yy = numpy.reshape(y[i:i+segment_size], (segment_size, 1))
-        else:
-            # We pad y labels with *y_delay* zeros (so that RNNs have some future context to predict classes)
-            yy = numpy.concatenate(([[0] for e in range(y_delay)], [[e] for e in y[i:i+segment_size-y_delay]]))[:segment_size]
+        yy = numpy.reshape(y[i:i+segment_size], (segment_size, 1))
         XY.append((xx, yy))
+    assert len(XY) == int(x.shape[0]/segment_step)-1
     return XY
+
+
+def unstepize(y, segment_size, segment_step):
+    N = len(y)
+    cut = segment_step/2
+    
+    res = np.empty(shape=(0), dtype=np.float32)
+    for i, e in enumerate(y):
+        if i == 0:
+            res = np.concatenate((res, e[:cut+segment_step]), axis=0)
+        elif i == N-1:
+            res = np.concatenate((res, e[cut:]), axis=0)
+        else:
+            res = np.concatenate((res, e[cut:cut+segment_step]), axis=0)
+    
+    assert res.shape[0] == 2*(segment_step+cut)+(N-3)*segment_step
+    return res
 
 
 def load_example(db, i, fs_target):
@@ -82,12 +108,13 @@ def load_example(db, i, fs_target):
     return numpy.load(f, mmap_mode='r', allow_pickle=True)
 
 
-def load_steps(db, i, fs_target, y_delay, segment_size, segment_step, normalized_steps):
-    f = data_dir + db + '/' + 'tr_{}_{}hz_{}delay_{}ssi_{}sst'.format(i, fs_target, y_delay, segment_size, segment_step)
+def load_steps(db, i, fs_target, segment_size, segment_step, normalized_steps, correct_peaks):
+    f = data_dir + db + '/' + 'tr_{}_{}hz_{}ssi_{}sst'.format(i, fs_target, segment_size, segment_step)
     if normalized_steps is not None and normalized_steps:
-        f += '-normalized.npy'
-    else:
-        f += '.npy'
+        f += '_normalized'
+    if correct_peaks:
+        f += '_corrected'
+    f += '.npy'
     return numpy.load(f, mmap_mode='r', allow_pickle=True)
 
 
@@ -110,39 +137,49 @@ def npz_to_npy(f):
     numpy.save(out_f, tmp)
 
 
-def transform_example(db, i, fs_target, y_delay=None, segment_size=None, segment_step=None, normalize_steps=None):
-    assert (y_delay is None and segment_size is None and segment_step is None and normalize_steps is None) or \
-           (y_delay is not None and segment_size is not None and segment_step is not None and normalize_steps is not None)
+def transform_example(db, i, fs_target, segment_size=None, segment_step=None, normalize_steps=None, correct_peaks=False):
+    assert (segment_size is None and segment_step is None and normalize_steps is None) or \
+           (segment_size is not None and segment_step is not None and normalize_steps is not None)
     print(db, i)
     f = data_dir + db + '/' + i
-    out_resamp_norm = data_dir + db + '/' + 'tr_{}_{}hz-normalized.npy'.format(i, fs_target)
-    out = data_dir + db + '/' + 'tr_{}_{}hz_{}delay_{}ssi_{}sst'.format(i, fs_target, y_delay, segment_size, segment_step)
+    out_resamp_norm = data_dir + db + '/' + 'tr_{}_{}hz_normalized'.format(i, fs_target)
+    out = data_dir + db + '/' + 'tr_{}_{}hz_{}ssi_{}sst'.format(i, fs_target, segment_size, segment_step)
     if normalize_steps is not None and normalize_steps:
-        out += '-normalized.npy'
-    else:
-        out += '.npy'
+        out += '_normalized'
+    if correct_peaks:
+        out += '_corrected'
+        out_resamp_norm += '_corrected'
+    out_resamp_norm += '.npy'
+    out += '.npy'
     if not os.path.isfile(out_resamp_norm):
         try:
             sig, fields = wfdb.srdsamp(f)
-        except:
+        except Exception as e:
             print(db, i, 'Could not be loaded with wfdb!')
             return
         fs = fields['fs']
         ann = wfdb.rdann(f, 'atr')
-        if not numpy.array_equal(ann.chan, numpy.full(len(ann.chan), ann.chan[0])): # Changing channels though time
-            print('Example {}/{} not good...'.format(db, i))
-            return
+        #if not numpy.array_equal(ann.chan, numpy.full(len(ann.chan), ann.chan[0])): # Changing channels though time
+        #    print('Example {}/{} not good...'.format(db, i))
+        #    return
         print(f, 'resampling...', end='')
-        x, y = resample(s=sig[:, ann.chan[0]], annsamp=ann.annsamp, anntype=ann.anntype, fs=fs, fs_target=fs_target)
+        print('annsamp', len(ann.annsamp))
+        x, y = resample(s=sig[:, 0], annsamp=ann.annsamp, anntype=ann.anntype, fs=fs, fs_target=fs_target)    
+        print('y', numpy.sum(y))
+        if numpy.sum(y) > 0:
+            min_bpm = 10
+            max_bpm = 350
+            min_gap = fs_target*60/min_bpm
+            max_gap = fs_target*60/max_bpm
+            yy = compute_best_peak(x, y, min_gap, max_gap)
+            y = numpy.zeros(x.shape[0], dtype='bool')
+            y[numpy.asarray(yy, dtype='int32')] = 1
         print('done!')
         print(f, 'normalizing...', end='')
         x = normalize(x)
         print('done!')
-        #y = numpy.zeros(len(x))
-        #print('annsamp', ann.annsamp, 'anntype', ann.anntype, 'subtype', ann.subtype)
-        #y[ann.annsamp] = 1
         numpy.save(out_resamp_norm, numpy.asarray([x, y]))
-    elif y_delay is not None and not os.path.isfile(out):
+    elif not os.path.isfile(out):
         try:
             xy = numpy.load(out_resamp_norm, mmap_mode='r', allow_pickle=True)
         except Exception as e:
@@ -150,9 +187,9 @@ def transform_example(db, i, fs_target, y_delay=None, segment_size=None, segment
             raise e
         x, y = xy
         print(out_resamp_norm)
-    if y_delay is not None and not os.path.isfile(out):
+    if not os.path.isfile(out):
         if len(x) >= segment_size:
-            XY = stepize(x, y, y_delay=y_delay, segment_size=segment_size,
+            XY = stepize(x, y, segment_size=segment_size,
                          segment_step=segment_step, normalize_steps=normalize_steps)
             numpy.save(out, numpy.asarray(XY))
             print(out)
@@ -160,7 +197,7 @@ def transform_example(db, i, fs_target, y_delay=None, segment_size=None, segment
             print('Could not stepize', out, 'as its length {} is lower than the minimum required {}.'.format(len(x), segment_size))
 
 
-def build_dataset(fs_target, y_delay=None, segment_size=None, segment_step=None, normalize_steps=None):
+def build_dataset(fs_target, segment_size=None, segment_step=None, normalize_steps=None, correct_peaks=False):
     # Do that in //
     # 1. Resample all signals to fs_target
     # 2. Normalize all signals
@@ -170,8 +207,8 @@ def build_dataset(fs_target, y_delay=None, segment_size=None, segment_step=None,
     inputs = []
     for db, ids in databases:
         for i in ids:
-            inputs.append((db, i, fs_target, y_delay, segment_size, segment_step, normalize_steps))
-    with Pool() as p:
+            inputs.append((db, i, fs_target, segment_size, segment_step, normalize_steps, correct_peaks))
+    with Pool(3) as p:
         res = p.starmap(transform_example, inputs)
 
 
@@ -232,11 +269,34 @@ def sa(v, a1, a2):
     return numpy.swapaxes(v, a1, a2)
 
 
-def is_peak(v, i, soft=False):
-    if soft:
-        return (v[i-1] <= v[i] and v[i] >= v[i+1]) or (v[i-1] >= v[i] and v[i] <= v[i+1])
-    else:
-        return (v[i-1] < v[i] and v[i] > v[i+1]) or (v[i-1] > v[i] and v[i] < v[i+1])
+def find_peaks(x):
+    # Definitions:
+    # * Hard peak: a peak that is either /\ or \/
+    # * Soft peak: a peak that is either /-*\ or \-*/ (In that cas we define the middle of it as the peak)
+    tmp = x[1:]
+    tmp = numpy.append(tmp, [0])
+    tmp = x-tmp
+    tmp[numpy.where(tmp>0)] = +1
+    tmp[numpy.where(tmp==0)] = 0
+    tmp[numpy.where(tmp<0)] = -1
+    tmp2 = tmp[1:]
+    tmp2 = numpy.append(tmp2, [0])
+    tmp = tmp-tmp2
+    hard_peaks = numpy.where(numpy.logical_or(tmp==-2,tmp==+2))[0]+1
+    soft_peaks = []
+    for iv in numpy.where(numpy.logical_or(tmp==-1,tmp==+1))[0]:
+        t = tmp[iv]
+        i = iv+1
+        while True:
+            if i==len(tmp) or tmp[i] == -t or tmp[i] == -2 or tmp[i] == 2:
+                break
+            if tmp[i] == t:
+                soft_peaks.append(int(iv+(i-iv)/2))
+                break
+            i += 1        
+    soft_peaks = numpy.asarray(soft_peaks)+1
+    return hard_peaks, soft_peaks
+
 
 def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
     # The neural network returns probabilities that we have a R-peak for each given sample.
@@ -253,20 +313,19 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
     rpeaks_ranges = []
     tmp = rpeaks[0] == 1
     tmp_idx = 0
-    for i in range(1, len(rpeaks)-2):
+    for i in range(1, len(rpeaks)-1):
         if tmp and rpeaks[i] > rpeaks[i+1]:
             rpeaks_ranges.append((tmp_idx, i))
             tmp = False
-        elif not tmp and rpeaks[i] < rpeaks[i+1]:
+        elif not tmp and rpeaks[i] < 1.0 and rpeaks[i+1] == 1.0:
             tmp = True
             tmp_idx = i+1
+    print('lol', len(rpeaks_ranges))
     mean = sum(signal)/len(signal)
     
     # Compute signal's peaks
-    all_peak_idxs = {}
-    for i in range(1, len(signal)-1):
-        if is_peak(signal, i, soft=True):
-            all_peak_idxs[i] = True
+    hard_peaks, soft_peaks = find_peaks(signal)
+    all_peak_idxs = numpy.concatenate((hard_peaks, soft_peaks))
     rpeaks_indexes = []
     for rp_range in rpeaks_ranges:
         r = numpy.arange(rp_range[0]-1, rp_range[1]+2)
