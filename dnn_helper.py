@@ -118,12 +118,12 @@ def load_steps(db, i, fs_target, segment_size, segment_step, normalized_steps, c
     return numpy.load(f, mmap_mode='r', allow_pickle=True)
 
 
-def shuffled_examples(fs_target, y_delay, segment_size, segment_step, normalize_steps):
+def shuffled_examples(fs_target, segment_size, segment_step, normalize_steps, correct_peaks):
     hhh = []
     ll = 0
     for db, ids in databases:
         for i in ids:
-            for j in range(len(load_steps(db, i, fs_target, y_delay, segment_size, segment_step, normalize_steps))):
+            for j in range(len(load_steps(db, i, fs_target, segment_size, segment_step, normalize_steps, correct_peaks))):
                 hhh.append((db, i, j))
     numpy.random.shuffle(hhh)
     return hhh
@@ -208,7 +208,7 @@ def build_dataset(fs_target, segment_size=None, segment_step=None, normalize_ste
     for db, ids in databases:
         for i in ids:
             inputs.append((db, i, fs_target, segment_size, segment_step, normalize_steps, correct_peaks))
-    with Pool(3) as p:
+    with Pool(7) as p:
         res = p.starmap(transform_example, inputs)
 
 
@@ -328,7 +328,7 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
     all_peak_idxs = numpy.concatenate((hard_peaks, soft_peaks))
     rpeaks_indexes = []
     for rp_range in rpeaks_ranges:
-        r = numpy.arange(rp_range[0]-1, rp_range[1]+2)
+        r = numpy.arange(rp_range[0]-1, rp_range[1]+2, dtype='int64')
         vals = signal[r]
         
         f = False
@@ -343,11 +343,11 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
     # If possible, replace non-peaks by the nearest peak in x-max_gap < x < x+max_gap
     for p in rpeaks_indexes:
         if p not in all_peak_idxs:
-            tmp = numpy.asarray(list(all_peak_idxs))
+            tmp = numpy.asarray(list(all_peak_idxs), dtype='int64')
             v = tmp[numpy.argmin(numpy.absolute(tmp-p))] # nearest peak index
             if p-max_gap < v < p+max_gap:
                 rpeaks_indexes.remove(p)
-                rpeaks_indexes.append(v)
+                rpeaks_indexes.append(int(v))
     rpeaks_indexes = list(set(rpeaks_indexes))
     
     # Prevent multiple peaks to appear in the max bpm range (max_gap)
@@ -360,14 +360,14 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
         r = tmp[numpy.where(numpy.absolute(tmp-idx)<=max_gap)[0]]
         if len(r) == 1:
             continue
-        vals = signal[r]
+        vals = signal[r.astype('int64')]
         the_one = r[numpy.argmax(numpy.absolute(numpy.asarray(vals)-mean))]
         for i in r:
             if i != the_one:
                 to_remove[i] = True
     for v, _ in to_remove.items():
         rpeaks_indexes.remove(v)
-                
+    
     return rpeaks_indexes
 
 
