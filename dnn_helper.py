@@ -299,17 +299,19 @@ def find_peaks(x):
 
 
 def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
-    # The neural network returns probabilities that we have a R-peak for each given sample.
-    #  Sometimes it predicts multiple ones '1' side by side,
-    #  in order to prevent that, the following code computes the best peak
     assert signal.shape == rpeaks.shape
+    N = len(signal)
+    # The neural network returns probabilities that we have a R-peak for each given sample.
+    
+    # Sometimes it predicts multiple ones '1' side by side,
+    # in order to prevent that, the following code computes the best peak
+    
     if threshold is not None:
         x = numpy.where(rpeaks>=threshold)
         numpy.put(rpeaks, x, 1.0)
     rpeaks = rpeaks.astype('int32')
-    x = numpy.where(rpeaks==1.0)
-    y = signal[x]
-    # Extract ranges where we have many ones side by side (rpeaks locations predicted by NN)
+        
+    # 1- Extract ranges where we have one or many ones side by side (rpeaks locations predicted by NN)
     rpeaks_ranges = []
     tmp = rpeaks[0] == 1
     tmp_idx = 0
@@ -320,35 +322,36 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
         elif not tmp and rpeaks[i] < 1.0 and rpeaks[i+1] == 1.0:
             tmp = True
             tmp_idx = i+1
-    print('lol', len(rpeaks_ranges))
-    mean = sum(signal)/len(signal)
+    
+    print('Number of peak ranges found:', len(rpeaks_ranges))
+    
+    smoothed = smooth(smooth(signal, 150), 150)
     
     # Compute signal's peaks
     hard_peaks, soft_peaks = find_peaks(signal)
-    all_peak_idxs = numpy.concatenate((hard_peaks, soft_peaks))
-    rpeaks_indexes = []
+    all_peak_idxs = numpy.concatenate((hard_peaks, soft_peaks)).astype('int64')
+    
+    # Replace each range of ones by the index of the best value in it
+    tmp = set()
     for rp_range in rpeaks_ranges:
-        r = numpy.arange(rp_range[0]-1, rp_range[1]+2, dtype='int64')
+        r = numpy.arange(rp_range[0], rp_range[1]+1, dtype='int64')
         vals = signal[r]
-        
-        f = False
-        for i in range(1, len(vals)-1):
-            if i in all_peak_idxs:
-                rpeaks_indexes.append(r[i])
-                f = True
-                
-        if not f:
-            # Take the sample that has the maximum amplitude compared to the mean of the signal
-            rpeaks_indexes.append(r[numpy.argmax(numpy.absolute(numpy.asarray(vals)-mean))])
-    # If possible, replace non-peaks by the nearest peak in x-max_gap < x < x+max_gap
-    for p in rpeaks_indexes:
-        if p not in all_peak_idxs:
-            tmp = numpy.asarray(list(all_peak_idxs), dtype='int64')
-            v = tmp[numpy.argmin(numpy.absolute(tmp-p))] # nearest peak index
-            if p-max_gap < v < p+max_gap:
-                rpeaks_indexes.remove(p)
-                rpeaks_indexes.append(int(v))
-    rpeaks_indexes = list(set(rpeaks_indexes))
+        smoothed_vals = smoothed[r]
+        p = r[numpy.argmax(numpy.absolute(numpy.asarray(vals)-smoothed_vals))]
+        tmp.add(p)
+
+            
+    # Replace all peaks by the peak within x-max_gap < x < x+max_gap which have the bigget distance from smooth curve
+    dist = numpy.absolute(signal-smoothed) # Peak distance from the smoothed mean
+    rpeaks_indexes = set()
+    for p in tmp:
+        a = max(0, p-max_gap)
+        b = min(N, p+max_gap)
+        r = numpy.arange(a, b, dtype='int64')
+        idx_best = r[numpy.argmax(dist[r])]
+        rpeaks_indexes.add(idx_best)
+    
+    rpeaks_indexes = list(rpeaks_indexes)
     
     # Prevent multiple peaks to appear in the max bpm range (max_gap)
     # If we found more than one peak in this interval, then we choose the peak we the maximum amplitude compared to the mean of the signal
@@ -360,13 +363,17 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
         r = tmp[numpy.where(numpy.absolute(tmp-idx)<=max_gap)[0]]
         if len(r) == 1:
             continue
-        vals = signal[r.astype('int64')]
-        the_one = r[numpy.argmax(numpy.absolute(numpy.asarray(vals)-mean))]
+        rr = r.astype('int64')
+        vals = signal[rr]
+        smoo = smoothed[rr]
+        the_one = r[numpy.argmax(numpy.absolute(vals-smoo))]
         for i in r:
             if i != the_one:
                 to_remove[i] = True
     for v, _ in to_remove.items():
         rpeaks_indexes.remove(v)
+    
+#     assert len(rpeaks_ranges) == len(rpeaks_indexes)
     
     return rpeaks_indexes
 
