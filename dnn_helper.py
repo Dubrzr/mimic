@@ -297,6 +297,9 @@ def find_peaks(x):
     soft_peaks = numpy.asarray(soft_peaks)+1
     return hard_peaks, soft_peaks
 
+def smooth(x, window_size):
+    box = numpy.ones(window_size)/window_size
+    return numpy.convolve(x, box, mode='same')
 
 def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
     assert signal.shape == rpeaks.shape
@@ -325,7 +328,7 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
     
     print('Number of peak ranges found:', len(rpeaks_ranges))
     
-    smoothed = smooth(smooth(signal, 150), 150)
+    smoothed = smooth(signal, 500)
     
     # Compute signal's peaks
     hard_peaks, soft_peaks = find_peaks(signal)
