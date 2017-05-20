@@ -2,7 +2,9 @@ import os
 from pathlib import Path
 import requests
 import hashlib
+import pickle
 import json
+
 
 def sizeof_fmt(num, suffix='B'):
     for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
@@ -73,3 +75,38 @@ def read_json(filepath):
 def write_json(contents, filepath):
     with open(filepath, 'w+') as f:
         json.dump(contents, f)
+
+        
+def save_model(out_file, model, params):
+    net = {'model': model, 'params': params}
+    pickle.dump(net, open(out_file, 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
+
+    
+def load_model(filepath):
+    net = pickle.load(open(filepath,'rb'))
+    model = net['model']
+    params = net['params']
+    return model, params
+
+
+def load_fnpz(f):
+    xy = numpy.load(f, mmap_mode='r', allow_pickle=True)['arr_0']
+    return xy[0,:], xy[1,:]
+
+
+def load_example(data_dir, db, i, fs_target):
+    f = data_dir + db + '/' + 'tr_{}_{}hz-normalized.npy'.format(i, fs_target)
+    if not os.path.isfile(f):
+        transform_example(db, i, fs_target)
+    return numpy.load(f, mmap_mode='r', allow_pickle=True)
+
+
+def load_steps(data_dir, db, i, params):
+    f = data_dir + db + '/' + 'tr_{}_{}hz_{}ssi_{}sst'.format(i, params['fs_target'], params['segment_size'], params['segment_step'])
+    if params['normalized_steps']:
+        f += '_normalized'
+    if params['correct_peaks']:
+        f += '_corrected'
+    f += '.npy'
+    return numpy.load(f, mmap_mode='r', allow_pickle=True)
+
