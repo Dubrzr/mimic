@@ -47,20 +47,17 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
         x = numpy.where(rpeaks>=threshold)
         numpy.put(rpeaks, x, 1.0)
     rpeaks = rpeaks.astype('int32')
-        
+    
     # 1- Extract ranges where we have one or many ones side by side (rpeaks locations predicted by NN)
     rpeaks_ranges = []
-    tmp = rpeaks[0] == 1
     tmp_idx = 0
-    for i in range(1, len(rpeaks)-1):
-        if tmp and rpeaks[i] > rpeaks[i+1]:
-            rpeaks_ranges.append((tmp_idx, i))
-            tmp = False
-        elif not tmp and rpeaks[i] < 1.0 and rpeaks[i+1] == 1.0:
-            tmp = True
-            tmp_idx = i+1
-    
-    #print('Number of peak ranges found:', len(rpeaks_ranges))
+    for i in range(1, len(rpeaks)):
+        if rpeaks[i-1] == 1:
+            if rpeaks[i] == 0:
+                rpeaks_ranges.append((tmp_idx, i-1))
+        else:
+            if rpeaks[i] == 1:
+                tmp_idx = i
     
     smoothed = smooth(signal, 500)
     
@@ -76,7 +73,6 @@ def compute_best_peak(signal, rpeaks, min_gap, max_gap, threshold=None):
         smoothed_vals = smoothed[r]
         p = r[numpy.argmax(numpy.absolute(numpy.asarray(vals)-smoothed_vals))]
         tmp.add(p)
-
             
     # Replace all peaks by the peak within x-max_gap < x < x+max_gap which have the bigget distance from smooth curve
     dist = numpy.absolute(signal-smoothed) # Peak distance from the smoothed mean

@@ -3,6 +3,9 @@ from file_utils import create_folder, write_json, read_json
 import time
 import numpy
 import random
+from matplotlib import pyplot as plt
+import matplotlib as mpl
+import pickle
 
 from theano import tensor, function, config
 from theano.tensor import basic, clip
@@ -14,6 +17,9 @@ from lasagne.nonlinearities import sigmoid, rectify
 from lasagne.init import GlorotUniform
 from theano.printing import Print
 from lasagne.regularization import regularize_network_params, l2, l1
+
+from file_utils import load_steps
+from evaluate import eval_model
 
 def my_loss(model, predictions, targets, regularization, params):
     predictions = predictions[0][0][params['left_border']:-params['right_border']]
@@ -28,6 +34,9 @@ def my_loss(model, predictions, targets, regularization, params):
         return loss
 
     
+nonlinearity_mapping = {
+    'rectify': rectify
+}
 def build_lasagne_model(architecture, dim, input_tensor, shape):
     last_layer = InputLayer(shape, input_var=input_tensor)
     print('Model shape:')
@@ -37,13 +46,13 @@ def build_lasagne_model(architecture, dim, input_tensor, shape):
         ll = []
         for l in layers:
             filter_size, num_filters, nonlinearity, pad = l
-            cl = Conv1DLayer(last_layer, num_filters=num_filters, filter_size=(filter_size), nonlinearity=nonlinearity, pad=pad)
+            cl = Conv1DLayer(last_layer, num_filters=num_filters, filter_size=(filter_size), nonlinearity= nonlinearity_mapping[nonlinearity], pad=pad)
             ll.append(cl)
             print('    - size: {}\tnum: {}'.format(filter_size, num_filters, get_output_shape(cl)))
         c = ConcatLayer(ll, axis=1)
         last_layer = DropoutLayer(c, p=dropout)
         print('    - dropout: {}'.format(dropout))
-    return Conv1DLayer(last_layer, num_filters=1, filter_size=3, nonlinearity=sigmoid, pad='same')    
+    return Conv1DLayer(last_layer, num_filters=1, filter_size=3, nonlinearity=sigmoid, pad='same')
 
 
 class LasagneNN:
@@ -57,6 +66,7 @@ class LasagneNN:
         self.model = build_lasagne_model(architecture, dim, self.t_in, self.input_shape)
         self.params = params
         self.trained = False
+        self.dim = dim
         
         test_pred = get_output(self.model, deterministic=False)
         test_loss = my_loss(self.model, test_pred, self.t_out, False, params)
@@ -78,7 +88,7 @@ class LasagneNN:
         set_all_param_values(self.model, weights)
         self.trained = True
     
-    def train(self, train_exs, test_exs, num_epochs, examples_by_epoch, save_name, eval_during_training=False):
+    def train(self, train_exs, test_exs, num_epochs, examples_by_epoch, data_dir, save_name, eval_during_training=False):
         trainN, testN = len(train_exs), len(test_exs)
         print('Training on {} examples, testing on {} examples.'.format(trainN, testN))
         print("Starting training...")
@@ -96,7 +106,7 @@ class LasagneNN:
             invalid_example = 0
             for z in range(examples_by_epoch):
                 db, i, j = train_exs[ex_count%trainN]
-                XY = load_steps(db, i, *self.params)[j]
+                XY = load_steps(db, i, self.params)[j]
                 x, y = numpy.reshape(XY[0], (1, 1, 5000)).astype('float16'), numpy.reshape(XY[1], (1, 5000)).astype('float16')
                 ex_count += 1
                 if numpy.sum(y) == 0.:
@@ -117,7 +127,7 @@ class LasagneNN:
                 invalid_example = 0
                 for k in range(testN):
                     db, i, j = train_exs[k]
-                    XY = load_steps(db, i, *self.params)[j]
+                    XY = load_steps(db, i, self.params)[j]
                     x, y = numpy.reshape(XY[0], (1, 1, 5000)).astype('float16'), numpy.reshape(XY[1], (1, 5000)).astype('float16')
                     if numpy.sum(y) == 0.:
                         invalid_example += 1
@@ -133,7 +143,7 @@ class LasagneNN:
                 plt.plot(train_losses, color='r')
                 plt.plot(rps, color='g')
                 plt.show()
-                eval_model(test_exs, self.evaluate, self.params,plot_examples=True, nb=3, nearest_fpr=0.01, threshold=0.98, eval_margin=10)
+                eval_model(test_exs, self.evaluate, self.params, plot_examples=True, nb=3, nearest_fpr=0.01, threshold=0.98, eval_margin=10)
             save_lasagne_nn_epoch(save_name, self, epoch, train_loss / examples_by_epoch)
         self.trained = True
     
@@ -144,14 +154,14 @@ class LasagneNN:
         fs_target, y_delay, segment_size, segment_step, normalized_steps = self.params
 
 def save_lasagne_nn_epoch(save_name, nn, epoch, loss):
-    name = '{}.epoch{}.loss{:.6f}.weights'.format(save_name, int(epoch), loss)
-    write_json({'arch': nn.architecture, 'dim': nn.dim, 'params': nn.params}, fname + '.json')
-    pickle.dump({'weights': get_all_param_values(nn.model)}, open(fname + '.weights', 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
-        
-        
-def save_lasagne_nn(save_name, nn):
+    name = '{}/epoch{}.loss{:.6f}'.format(save_name, int(epoch), loss)
     write_json({'arch': nn.architecture, 'dim': nn.dim, 'params': nn.params}, save_name + '.json')
-    pickle.dump({'weights': get_all_param_values(nn.model)}, open(save_name + '.weights', 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
+    pickle.dump({'weights': get_all_param_values(nn.model)}, open(name + '.weights', 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
+        
+        
+def save_lasagne_nn(json_name, weights_name nn):
+    write_json({'arch': nn.architecture, 'dim': nn.dim, 'params': nn.params}, json_name)
+    pickle.dump({'weights': get_all_param_values(nn.model)}, open(weights_name, 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
 
     
 def load_lasagne_nn(save_name):

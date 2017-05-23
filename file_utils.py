@@ -4,6 +4,7 @@ import requests
 import hashlib
 import pickle
 import json
+import numpy
 
 
 def sizeof_fmt(num, suffix='B'):
@@ -101,9 +102,10 @@ def load_example(data_dir, db, i, fs_target):
     return numpy.load(f, mmap_mode='r', allow_pickle=True)
 
 
-def load_steps(data_dir, db, i, params):
+def load_steps(db, i, params):
+    data_dir = params['data_dir']
     f = data_dir + db + '/' + 'tr_{}_{}hz_{}ssi_{}sst'.format(i, params['fs_target'], params['segment_size'], params['segment_step'])
-    if params['normalized_steps']:
+    if params['normalize_steps']:
         f += '_normalized'
     if params['correct_peaks']:
         f += '_corrected'
