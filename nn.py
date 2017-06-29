@@ -104,6 +104,7 @@ class LasagneNN:
             train_loss = 0
             train_loss_with_reg = 0
             invalid_example = 0
+            tot_t = 0
             for z in range(examples_by_epoch):
                 db, i, j = train_exs[ex_count%trainN]
                 XY = load_steps(db, i, self.params)[j]
@@ -112,11 +113,13 @@ class LasagneNN:
                 if numpy.sum(y) == 0.:
                     invalid_example += 1
                     continue
+                t1 = time.time()
                 tmp_loss = self.train_fn(x, y)
+                tot_t += time.time() - t1
                 train_loss += tmp_loss
                 train_losses.append(train_loss/(z+1-invalid_example))
-            print('Done in {:.3f}s!'.format(time.time() - start_time))
             nnn = examples_by_epoch - invalid_example
+            print('Done in {:.3f}s! ({:.3f}ms/example)'.format(time.time() - start_time, tot_t/nnn*1000))
             print("  - training loss:\t\t{:.6f}".format(train_loss / nnn))
             
             if eval_during_training:
@@ -147,25 +150,25 @@ class LasagneNN:
             save_lasagne_nn_epoch(save_name, self, epoch, train_loss / examples_by_epoch)
         self.trained = True
     
-    def evaluate(self, x, fs_target):
+    def evaluate_x(self, x):
+        x = numpy.reshape(x, (1, 1, 5000))
         if not self.trained:
             print('Neural Network not trained!')
-            return
-        fs_target, y_delay, segment_size, segment_step, normalized_steps = self.params
-
+            raise Exception()
+        return self.evaluate(x)[0][0]
+        
 def save_lasagne_nn_epoch(save_name, nn, epoch, loss):
     name = '{}/epoch{}.loss{:.6f}'.format(save_name, int(epoch), loss)
     write_json({'arch': nn.architecture, 'dim': nn.dim, 'params': nn.params}, save_name + '.json')
     pickle.dump({'weights': get_all_param_values(nn.model)}, open(name + '.weights', 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
         
-        
-def save_lasagne_nn(json_name, weights_name nn):
+def save_lasagne_nn(json_name, weights_name, nn):
     write_json({'arch': nn.architecture, 'dim': nn.dim, 'params': nn.params}, json_name)
     pickle.dump({'weights': get_all_param_values(nn.model)}, open(weights_name, 'wb+'), protocol=pickle.HIGHEST_PROTOCOL)
 
     
-def load_lasagne_nn(save_name):
-    info = read_json(save_name)
+def load_lasagne_nn(json_name, weights_name):
+    info = read_json(json_name)
     nn = LasagneNN(architecture=info['arch'], dim=info['dim'], params=info['params'])
-    nn.load_weights(pickle.load(open(filepath,'rb')['weights']))
-    return nn
+    nn.load_weights(pickle.load(open(weights_name,'rb'))['weights'])
+    return info, nn

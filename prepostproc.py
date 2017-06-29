@@ -3,63 +3,63 @@ from scipy import signal
 
 import wfdb
 from wfdb import Annotation
+from wfdb.processing import normalize, correct_peaks, resample_sig
 
 from file_utils import load_steps
-from rpeaks import compute_best_peak
-from sigproc import normalize
 import os
 
 from multiprocessing.pool import Pool
-    
+
 
 def resample_ann(tt, annsamp):
-    annsamp = numpy.sort(annsamp)
-    result = numpy.zeros(len(tt), dtype='bool')
+    tmp = numpy.zeros(len(tt), dtype='int16')
     j = 0
     tprec = tt[j]
     for i, v in enumerate(annsamp):
         while True:
-            if j+1 == len(tt):
-                result[j] = 1
-                break
             d = False
-            if v < tt[j+1]:
-                result[j] = 1
+            if v < tprec:
+                j -= 1
+                tprec = tt[j]
+                
+            if j+1 == len(tt):
+                tmp[j] += 1
+                break
+            
+            tnow = tt[j+1]
+            if tprec <= v and v <= tnow:
+                if v-tprec < tnow-v:
+                    tmp[j] += 1
+                else:
+                    tmp[j+1] += 1
                 d = True
             j += 1
+            tprec = tnow
             if d:
                 break
-    return numpy.where(result==True)[0].astype('int64')
-
-
-def resample_sig(x, fs, fs_target):
-    t = numpy.arange(x.shape[0]).astype('float64')
+                
+    idx = numpy.where(tmp>0)[0].astype('int64')
+    res = []
+    for i in idx:
+        for j in range(tmp[i]):
+            res.append(i)
+    assert len(res) == len(annsamp)
+    return numpy.asarray(res, dtype='int64')
     
-    if fs == fs_target:
-        return x, t
-    
-    new_length = int(x.shape[0]*fs_target/fs)
-    xx, tt = signal.resample(x, num=new_length, t=t)
-    assert xx.shape == tt.shape and xx.shape[0] == new_length
-    assert numpy.all(numpy.diff(tt) > 0)
-    return xx, tt
-
-
-def resample_singlechan(x, ann, fs, fs_target):
-    xx, tt = resample_sig(x, fs, fs_target)
-    
-    new_annsamp = resample_ann(tt, ann.annsamp)
-    print(ann.annsamp.shape, new_annsamp.shape)
-    assert ann.annsamp.shape == new_annsamp.shape
-    
-    new_ann = Annotation(ann.recordname, ann.annotator, new_annsamp, ann.anntype, ann.num, ann.subtype, ann.chan, ann.aux, ann.fs)
-    return xx, new_ann
 
 
 def resample_multichan(xs, ann, fs, fs_target, resamp_ann_chan=0):
-    # resample_ann_channel is the signal channel that is used to compute new annotation indexes
+    # xs: a numpy.ndarray containing the signals as returned by wfdb.srdsamp
+    # ann: an Annotation object
+    # fs: the current frequency
+    # fs_target: the target frequency
+    # resample_ann_channel: the signal channel that is used to compute new annotation indexes
+
+    # Resample multiple channels with their annotations
+
     assert resamp_ann_chan < xs.shape[1]
-    
+    assert numpy.array_equal(ann.annsamp, sorted(ann.annsamp))
+
     lx = []
     lt = None
     for chan in range(xs.shape[1]):
@@ -68,20 +68,17 @@ def resample_multichan(xs, ann, fs, fs_target, resamp_ann_chan=0):
         if chan == resamp_ann_chan:
             lt = tt
     
-    new_annsamp = resample_ann(lt, ann.annsamp)
-    assert ann.annsamp.shape == new_annsamp.shape
+    cc = len(ann.annsamp)
     
+    new_annsamp = resample_ann(lt, ann.annsamp)
+    
+    if cc != len(new_annsamp):
+        print(cc, numpy.sum(new_annsamp), len(tt))
+        
+    assert cc == len(new_annsamp)
+
     new_ann = Annotation(ann.recordname, ann.annotator, new_annsamp, ann.anntype, ann.num, ann.subtype, ann.chan, ann.aux, ann.fs)
     return numpy.column_stack(lx), new_ann
-
-
-def normalize(x, lb=0, ub=1):
-    mid = ub - (ub - lb) / 2
-    min_v = numpy.min(x)
-    max_v = numpy.max(x)
-    mid_v =  max_v - (max_v - min_v) / 2
-    coef = (ub - lb) / (max_v - min_v)
-    return x * coef - (mid_v * coef) + mid
 
 
 def to_flat(annsamp, size):
@@ -92,59 +89,102 @@ def to_flat(annsamp, size):
 
 def is_valid_example(x, y):
     # Valid is:
-    #  * At least two annotations
+    #  * At least four annotations
     #  * A continuous signal
-    if numpy.sum(y) < 2:
+    if len(numpy.where(y==1)[0]) < 2:
+        return False
+    if numpy.max(x) == numpy.min(x):
         return False
     if numpy.isnan(x).any():
         return False
     return True
 
 
-def stepize(x, y, params, check_validity=False):
+def stepize_x(x, params):
     segment_size = params['segment_size']
     segment_step = params['segment_step']
+    cut = int(segment_step / 2)
+    assert x.shape[0] >= segment_size
+    
+    X = [x[0:segment_size]]
+    
+    nb_blue, remain = divmod(x.shape[0]-cut-segment_step, segment_step)
+    
+    if remain > 0 and remain < cut:
+        nb_blue -= 1
+        
+    for i in range(nb_blue):
+        lb = (i+1)*segment_step
+        ub = (i+1)*segment_step + segment_size
+        X.append(x[lb:ub])
+    
+    if remain > 0:
+        X.append(x[-segment_size:])
+    
+    if params['normalize_steps']:
+        X = [wfdb.processingnormalize(x) for x in X]
+    
+    return X
+
+
+def stepize_xy(x, y, params, check_validity=False):
+    assert x.shape == y.shape
+    segment_size = params['segment_size']
+    segment_step = params['segment_step']
+    cut = int(segment_step / 2)
     normalize_steps = params['normalize_steps']
     assert x.shape[0] >= segment_size
-    print(numpy.sum(y))
-    XY = []
-    for i in range(0, len(x)+1-segment_size, segment_step):
-        if normalize_steps:
-            xx = numpy.reshape(normalize(x[i:i+segment_size]), (segment_size, 1))
-        else:
-            xx = numpy.reshape(x[i:i+segment_size], (segment_size, 1))
-        yy = numpy.reshape(y[i:i+segment_size], (segment_size, 1))
-        if check_validity:
-            if is_valid_example(xx, yy):
-                XY.append((xx, yy))
-        else:
-            XY.append((xx, yy))
-            
+    N = x.shape[0]
+    XY = [(x[0:segment_size], y[0:segment_size])]
+    
+    nb_blue, remain = divmod(x.shape[0]-cut-segment_step, segment_step)
+    
+    if remain > 0 and remain < cut:
+        nb_blue -= 1
+    
+    for i in range(nb_blue):
+        lb = (i+1)*segment_step
+        ub = (i+1)*segment_step + segment_size
+        XY.append((x[lb:ub], y[lb:ub]))
+    
+    if remain > 0:
+        XY.append((x[-segment_size:], y[-segment_size:]))
+    
     if check_validity:
-        print('{}/{} valid examples added!'.format(len(XY), int(x.shape[0]/segment_step)-1))
+        XY = [(x, y) for x, y in XY if is_valid_example(x, y)]
+        print('{}/{} valid examples added!'.format(len(XY), int(N/segment_step)-1))
     else:
-        assert len(XY) == int(x.shape[0]/segment_step)-1
+        print("{} examples added!".format(len(XY)))
+        
+    if normalize_steps:
+        XY = [(normalize(x), y) for x, y in XY]
     
     return XY
 
 
-def unstepize(y, params):
+def unstepize(y, length, params):
     segment_size = params['segment_size']
     segment_step = params['segment_step']
-    N = len(y)
-    cut = segment_step/2
+    cut = int(segment_step/2)
     
-    res = numpy.empty(shape=(0), dtype=numpy.float32)
-    for i, e in enumerate(y):
-        if i == 0:
-            res = numpy.concatenate((res, e[:cut+segment_step]), axis=0)
-        elif i == N-1:
-            res = numpy.concatenate((res, e[cut:]), axis=0)
-        else:
-            res = numpy.concatenate((res, e[cut:cut+segment_step]), axis=0)
+    Y = [y[0][:cut+segment_step]]
     
-    assert res.shape[0] == 2*(segment_step+cut)+(N-2)*segment_step
-    return res
+    nb_blue, remain = divmod(length-cut-segment_step, segment_step)
+    
+    if remain > 0 and remain < cut:
+        nb_blue -= 1
+        remain += segment_step
+    
+    for i in range(nb_blue):
+        Y.append(y[i+1][cut:cut+segment_step])
+    
+    if remain > 0:
+        Y.append(y[-1][-remain:])
+    
+    result = numpy.concatenate(Y)
+    assert result.shape[0] == length
+    
+    return result
 
 
 def shuffled_examples(dbs, params):
@@ -170,11 +210,12 @@ def transform_example(data_dir, db, i, params):
     segment_size = params['segment_size']
     segment_step = params['segment_step']
     normalize_steps = params['normalize_steps']
-    correct_peaks = params['correct_peaks']
+    cp = params['correct_peaks']
     fs_target = params['fs_target']
     min_gap = params['min_gap']
     max_gap = params['max_gap']
     beats = params['beats']
+    smooth_window_correct = params['smooth_window_correct']
     
     assert (segment_size is None and segment_step is None and normalize_steps is None) or \
            (segment_size is not None and segment_step is not None and normalize_steps is not None)
@@ -183,7 +224,7 @@ def transform_example(data_dir, db, i, params):
     out = data_dir + db + '/' + 'tr_{}_{}hz_{}ssi_{}sst'.format(i, fs_target, segment_size, segment_step)
     if normalize_steps is not None and normalize_steps:
         out += '_normalized'
-    if correct_peaks:
+    if cp:
         out += '_corrected'
         out_resamp_norm += '_corrected'
     out_resamp_norm += '.npy'
@@ -197,32 +238,39 @@ def transform_example(data_dir, db, i, params):
             #if not numpy.array_equal(ann.chan, numpy.full(len(ann.chan), ann.chan[0])): # Changing channels though time
             #    print('Example {}/{} not good...'.format(db, i))
             #    return
-            sig, ann = resample_multichan(xs=sig, ann=ann, fs=fs, fs_target=fs_target)
+            old = len(ann.annsamp)
+            if fs_target != fs:
+                sig, ann = resample_multichan(xs=sig, ann=ann, fs=fs, fs_target=fs_target)
+            assert len(ann.annsamp) == old
             y = numpy.zeros(sig.shape[0], dtype='int32')
             if beats is not None:
                 beat_ann_indexes = ann.annsamp[numpy.where(numpy.in1d(ann.anntype, beats))[0]]
                 y[beat_ann_indexes] = 1
-                #print('len(beat_ann_indexes)', len(beat_ann_indexes), 'numpy.sum(y)', numpy.sum(y), 'len(y)', len(y))
             else:
                 y[ann.annsamp] = 1
-            if numpy.sum(y) > 0:
-                yy = compute_best_peak(sig[:,0], y, min_gap, max_gap)
-                y = numpy.zeros(sig.shape[0], dtype='bool')
-                y[numpy.asarray(yy, dtype='int32')] = 1
-            #x = normalize(x)
-            numpy.save(out_resamp_norm, numpy.column_stack([sig, y]))
-        elif not os.path.isfile(out):
-            xy = numpy.load(out_resamp_norm, mmap_mode='r', allow_pickle=True)
-            sig, y = xy[:, 0:xy.shape[1]-2], xy[:, xy.shape[1]-1]
-        if not os.path.isfile(out):
+            assert numpy.sum(y) > 0
+            res = []
             for u in range(sig.shape[1]):
-                XY = []
-                if sig.shape[0] >= segment_size:
-                    XY += stepize(sig[:, u], y, params, check_validity=True)
+                yy = correct_peaks(x=sig[:,u], peaks_indexes=numpy.where(y>0)[0], min_gap=min_gap, max_gap=max_gap, smooth_window=smooth_window_correct)
+                yyy = numpy.zeros(sig.shape[0], dtype='bool')
+                yyy[numpy.asarray(yy, dtype='int32')] = 1
+                assert numpy.sum(yyy) > 1
+                res.append(numpy.stack((sig[:, u], yyy)))
+            numpy.save(out_resamp_norm, numpy.asarray(res))
+        elif not os.path.isfile(out):
+            res = numpy.load(out_resamp_norm, mmap_mode='r', allow_pickle=True)
+        if not os.path.isfile(out):
+            XY = []
+            for e in res:
+                x, y = e[0], e[1]
+                if x.shape[0] >= segment_size:
+                    assert numpy.sum(y) > 0
+                    XY += stepize_xy(x, y, params, check_validity=True)
                 else:
                     print('Could not stepize', out, 'as its length {} is lower than the minimum required {}.'.format(len(x), segment_size))
                     break
-                numpy.save(out, numpy.asarray(XY))
+            XY = [(numpy.reshape(x, (segment_size,1)), numpy.reshape(y, (segment_size, 1))) for x, y in XY]
+            numpy.save(out, numpy.asarray(XY))
     except Exception as e:
         print('failed on {}/{}'.format(db, i))
         raise e
