@@ -1,0 +1,1 @@
+cat all_mimic3wdb_matched.txt | parallel --bar --jobs 32 --retries 9999 'a={};curl $a |hdfs dfs -put -f - /user/jdubiel/mimic3wdb-matched/$(echo $a|cut -d'/' -f8)/$(echo $a|cut -d'/' -f9)' &>> log_parallel
